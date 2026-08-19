@@ -1,9 +1,20 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, SelectQueryBuilder } from 'typeorm';
+import { QueryFailedError, Repository, SelectQueryBuilder } from 'typeorm';
 import { Service } from './entities/service.entity';
 import { ServiceVersion } from './entities/service-version.entity';
 import { FindServicesQueryDto } from './dto/find-services-query.dto';
+import { CreateServiceDto } from './dto/create-service.dto';
+import { UpdateServiceDto } from './dto/update-service.dto';
+import { CreateServiceVersionDto } from './dto/create-service-version.dto';
+import { UpdateServiceVersionDto } from './dto/update-service-version.dto';
+
+/** Postgres unique_violation. */
+const PG_UNIQUE_VIOLATION = '23505';
 
 @Injectable()
 export class ServicesService {
@@ -124,5 +135,152 @@ export class ServicesService {
     if (!exists) {
       throw new NotFoundException(`Service with id "${id}" was not found`);
     }
+  }
+
+  // --- Writes -------------------------------------------------------------
+
+  /**
+   * Relies on the database unique constraints rather than a read-then-write
+   * check, which would race under concurrent requests.
+   */
+  private static rethrowAsConflict(error: unknown, message: string): never {
+    if (
+      error instanceof QueryFailedError &&
+      (error as QueryFailedError & { code?: string }).code ===
+        PG_UNIQUE_VIOLATION
+    ) {
+      throw new ConflictException(message);
+    }
+    throw error;
+  }
+
+  async create(dto: CreateServiceDto): Promise<Service> {
+    const service = this.serviceRepository.create({
+      name: dto.name,
+      description: dto.description,
+      type: dto.type,
+      status: dto.status,
+      versions: (dto.versions ?? []).map((v) =>
+        this.versionRepository.create({
+          name: v.name,
+          description: v.description ?? null,
+          changelog: v.changelog ?? null,
+          releasedAt: v.releasedAt ? new Date(v.releasedAt) : new Date(),
+        }),
+      ),
+    });
+
+    try {
+      // `cascade: ['insert']` saves the service and its versions atomically.
+      const saved = await this.serviceRepository.save(service);
+      return this.findOne(saved.id);
+    } catch (error) {
+      // Service names are not unique, so the only unique constraint this can
+      // trip is (service_id, name) on versions — a payload repeating a
+      // version name.
+      ServicesService.rethrowAsConflict(
+        error,
+        'The submitted versions contain duplicate version names',
+      );
+    }
+  }
+
+  async update(id: string, dto: UpdateServiceDto): Promise<Service> {
+    const service = await this.serviceRepository.preload({ id, ...dto });
+
+    if (!service) {
+      throw new NotFoundException(`Service with id "${id}" was not found`);
+    }
+
+    // No unique constraint on any updatable column, so nothing here can
+    // conflict.
+    await this.serviceRepository.save(service);
+
+    return this.findOne(id);
+  }
+
+  async remove(id: string): Promise<void> {
+    // Versions go with it via ON DELETE CASCADE.
+    const result = await this.serviceRepository.delete({ id });
+
+    if (!result.affected) {
+      throw new NotFoundException(`Service with id "${id}" was not found`);
+    }
+  }
+
+  async addVersion(
+    serviceId: string,
+    dto: CreateServiceVersionDto,
+  ): Promise<ServiceVersion> {
+    await this.assertExists(serviceId);
+
+    const version = this.versionRepository.create({
+      serviceId,
+      name: dto.name,
+      description: dto.description ?? null,
+      changelog: dto.changelog ?? null,
+      releasedAt: dto.releasedAt ? new Date(dto.releasedAt) : new Date(),
+    });
+
+    try {
+      return await this.versionRepository.save(version);
+    } catch (error) {
+      ServicesService.rethrowAsConflict(
+        error,
+        `Version "${dto.name}" already exists for this service`,
+      );
+    }
+  }
+
+  async updateVersion(
+    serviceId: string,
+    versionId: string,
+    dto: UpdateServiceVersionDto,
+  ): Promise<ServiceVersion> {
+    const version = await this.findVersionOrFail(serviceId, versionId);
+
+    Object.assign(version, {
+      ...(dto.name !== undefined && { name: dto.name }),
+      ...(dto.description !== undefined && { description: dto.description }),
+      ...(dto.changelog !== undefined && { changelog: dto.changelog }),
+      ...(dto.releasedAt !== undefined && {
+        releasedAt: new Date(dto.releasedAt),
+      }),
+    });
+
+    try {
+      return await this.versionRepository.save(version);
+    } catch (error) {
+      ServicesService.rethrowAsConflict(
+        error,
+        `Version "${dto.name}" already exists for this service`,
+      );
+    }
+  }
+
+  async removeVersion(serviceId: string, versionId: string): Promise<void> {
+    await this.findVersionOrFail(serviceId, versionId);
+    await this.versionRepository.delete({ id: versionId });
+  }
+
+  /**
+   * Scopes the lookup to the parent so /services/A/versions/{a version of B}
+   * is a 404 rather than an accidental cross-service edit.
+   */
+  private async findVersionOrFail(
+    serviceId: string,
+    versionId: string,
+  ): Promise<ServiceVersion> {
+    const version = await this.versionRepository.findOne({
+      where: { id: versionId, serviceId },
+    });
+
+    if (!version) {
+      throw new NotFoundException(
+        `Version "${versionId}" was not found on service "${serviceId}"`,
+      );
+    }
+
+    return version;
   }
 }
