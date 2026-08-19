@@ -1,10 +1,18 @@
 import { Module } from '@nestjs/common';
-import { AppController } from './app.controller';
-import { AppService } from './app.service';
+import { ConfigModule } from '@nestjs/config';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { buildDataSourceOptions } from './config/typeorm.config';
+import { envValidationSchema } from './config/env.validation';
 
 @Module({
-  imports: [],
-  controllers: [AppController],
-  providers: [AppService],
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      validationSchema: envValidationSchema,
+    }),
+    TypeOrmModule.forRootAsync({
+      useFactory: () => buildDataSourceOptions(),
+    }),
+  ],
 })
 export class AppModule {}
