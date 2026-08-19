@@ -4,6 +4,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { buildDataSourceOptions } from './config/typeorm.config';
 import { envValidationSchema } from './config/env.validation';
 import { ServicesModule } from './services/services.module';
+import { AuthModule } from './auth/auth.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { ServicesModule } from './services/services.module';
     TypeOrmModule.forRootAsync({
       useFactory: () => buildDataSourceOptions(),
     }),
+    AuthModule,
     ServicesModule,
   ],
 })

@@ -1,10 +1,12 @@
 import { Controller, Get, Param, ParseUUIDPipe, Query } from '@nestjs/common';
 import {
+  ApiBearerAuth,
   ApiNotFoundResponse,
   ApiOkResponse,
   ApiOperation,
   ApiParam,
   ApiTags,
+  ApiUnauthorizedResponse,
 } from '@nestjs/swagger';
 import { ServicesService } from './services.service';
 import { FindServicesQueryDto } from './dto/find-services-query.dto';
@@ -15,6 +17,8 @@ import {
 import { PaginatedResponseDto } from '../common/dto/paginated-response.dto';
 
 @ApiTags('services')
+@ApiBearerAuth()
+@ApiUnauthorizedResponse({ description: 'Missing or invalid bearer token.' })
 @Controller('services')
 export class ServicesController {
   constructor(private readonly servicesService: ServicesService) {}
